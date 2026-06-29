@@ -340,8 +340,19 @@ export async function adaptSession<C extends Context>(bot: DiscordBot<C>, input:
   } else if (input.t === 'INTERACTION_CREATE' && input.d.type === Discord.Interaction.Type.MODAL_SUBMIT) {
     const data = input.d.data as Discord.InteractionData.ModalSubmit
     if (!data.custom_id.startsWith('input') && !data.custom_id.includes(':')) return
-    // @ts-ignore
-    const user_input = data.components[0].components[0].value
+    // Parse all fields from all action rows
+    const fields: Record<string, string> = {}
+    let firstValue = ''
+    for (const row of data.components) {
+      const comps = 'components' in row ? row.components : [row]
+      for (const comp of comps) {
+        if ('custom_id' in comp && 'value' in comp) {
+          fields[comp.custom_id as string] = comp.value as string
+          if (!firstValue) firstValue = comp.value as string
+        }
+      }
+    }
+    const user_input = firstValue || Object.values(fields).join(' ')
     await bot.internal.createInteractionResponse(input.d.id, input.d.token, {
       type: Discord.Interaction.CallbackType.DEFERRED_UPDATE_MESSAGE,
     })
@@ -353,26 +364,47 @@ export async function adaptSession<C extends Context>(bot: DiscordBot<C>, input:
     session.userId = session.isDirect ? input.d.user!.id : input.d.member!.user!.id
     session.messageId = input.d.id
     session.content = user_input
+    Object.defineProperty(session.event, 'modal', {
+      value: { custom_id: data.custom_id, fields },
+      writable: true,
+    })
   } else if (input.t === 'INTERACTION_CREATE' && input.d.type === Discord.Interaction.Type.MESSAGE_COMPONENT) {
-    const id = (input.d.data as Discord.InteractionData.MessageComponent).custom_id
+    const data = input.d.data as Discord.InteractionData.MessageComponent
+    const id = data.custom_id
     if (id.startsWith('input') && id.includes(':')) {
-      await bot.internal.createInteractionResponse(input.d.id, input.d.token, {
-        type: Discord.Interaction.CallbackType.MODAL,
-        data: {
-          custom_id: id,
-          title: 'Input',
-          components: [{
-            type: Discord.ComponentType.ACTION_ROW,
+      const modalConfig = bot.modals?.[id]
+      if (modalConfig) {
+        const components: Discord.ActionRow[] = modalConfig.inputs.map(input => ({
+          type: Discord.ComponentType.ACTION_ROW,
+          components: [input.type === 'file'
+            ? { type: Discord.ComponentType.FILE_UPLOAD as const, custom_id: input.custom_id, required: input.required !== false }
+            : { type: Discord.ComponentType.TEXT_INPUT as const, custom_id: input.custom_id, label: input.label, style: input.style, required: input.required !== false, value: input.value, placeholder: input.placeholder },
+          ],
+        }))
+        await bot.internal.createInteractionResponse(input.d.id, input.d.token, {
+          type: Discord.Interaction.CallbackType.MODAL,
+          data: { custom_id: id, title: modalConfig.title, components },
+        })
+      } else {
+        // Fallback: single text input (backward compatible)
+        await bot.internal.createInteractionResponse(input.d.id, input.d.token, {
+          type: Discord.Interaction.CallbackType.MODAL,
+          data: {
+            custom_id: id,
+            title: 'Input',
             components: [{
-              custom_id: id,
-              type: Discord.ComponentType.TEXT_INPUT,
-              label: 'Command',
-              value: id.slice(id.indexOf(':') + 1),
-              style: 1,
+              type: Discord.ComponentType.ACTION_ROW,
+              components: [{
+                custom_id: id,
+                type: Discord.ComponentType.TEXT_INPUT,
+                label: 'Command',
+                value: id.slice(id.indexOf(':') + 1),
+                style: 1,
+              }],
             }],
-          }],
-        },
-      })
+          },
+        })
+      }
     } else {
       await bot.internal.createInteractionResponse(input.d.id, input.d.token, {
         type: Discord.Interaction.CallbackType.DEFERRED_UPDATE_MESSAGE,
@@ -385,9 +417,10 @@ export async function adaptSession<C extends Context>(bot: DiscordBot<C>, input:
     session.userId = session.isDirect ? input.d.user!.id : input.d.member!.user!.id
     session.messageId = input.d.id
     session.content = ''
-    session.event.button = {
-      id,
-    }
+    session.event.button = Object.assign({ id }, {
+      componentType: data.component_type,
+      values: data.values || [],
+    })
   } else if (input.t === 'CHANNEL_CREATE') {
     session.type = 'channel-added'
     session.guildId = input.d.guild_id

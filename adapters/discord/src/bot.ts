@@ -1,4 +1,4 @@
-import { Bot, Context, Fragment, h, HTTP, Schema, Universal } from '@satorijs/core'
+import { Bot, Context, Dict, Fragment, h, HTTP, Schema, Universal } from '@satorijs/core'
 import * as Discord from './utils'
 import { DiscordMessageEncoder } from './message'
 import { Internal, Webhook } from './types'
@@ -6,6 +6,16 @@ import { WsClient } from './ws'
 
 // @ts-ignore
 import { version } from '../package.json'
+
+export interface ModalInput {
+  custom_id: string
+  label: string
+  style: 1 | 2
+  required?: boolean
+  value?: string
+  placeholder?: string
+  type?: 'text' | 'file'
+}
 
 export class DiscordBot<C extends Context = Context> extends Bot<C, DiscordBot.Config> {
   static MessageEncoder = DiscordMessageEncoder
@@ -16,6 +26,7 @@ export class DiscordBot<C extends Context = Context> extends Bot<C, DiscordBot.C
   public webhooks: Record<string, Webhook | null> = {}
   public webhookLock: Record<string, Promise<Webhook>> = {}
   public commands: Universal.Command[] = []
+  public modals: Dict<{ title: string; inputs: ModalInput[] }> = {}
 
   constructor(ctx: C, config: DiscordBot.Config) {
     super(ctx, config, 'discord')

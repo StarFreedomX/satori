@@ -1,7 +1,50 @@
 import { Context, Dict, h, MessageEncoder, Schema, Universal } from '@satorijs/core'
 import { DiscordBot } from './bot'
-import { ActionRow, Button, ButtonStyles, Channel, ComponentType, Message } from './types'
+import { ActionRow, Button, ButtonStyles, Channel, ComponentType, Embed, Message, SelectMenu } from './types'
 import { decodeMessage, sanitize, sanitizeCode } from './utils'
+
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      'discord:select': {
+        id: string
+        type?: 'string' | 'user' | 'role' | 'mentionable' | 'channel'
+        placeholder?: string
+        min?: number
+        max?: number
+        disabled?: boolean
+        action?: Function
+      }
+      'discord:option': { label: string; value: string; description?: string; emoji?: string; default?: boolean }
+      'discord:embed': { title?: string; description?: string; url?: string; color?: number; timestamp?: string }
+      'discord:embed-author': { name: string; iconUrl?: string; url?: string }
+      'discord:embed-footer': { text: string; iconUrl?: string }
+      'discord:embed-field': { name: string; value: string; inline?: boolean }
+      'discord:embed-image': { url: string }
+      'discord:embed-thumbnail': { url: string }
+      'discord:modal-input': {
+        label: string
+        id: string
+        style?: 'short' | 'paragraph'
+        required?: boolean
+        placeholder?: string
+        value?: string
+        type?: 'text' | 'file'
+      }
+    }
+  }
+}
+
+function parseColor(v: string | number): number | undefined {
+  if (typeof v === 'number') return v
+  const s = String(v).trim()
+  if (/^\d+$/.test(s)) return parseInt(s, 10)
+  const hex = s.replace(/^0x|^#/, '')
+  const n = parseInt(hex, 16)
+  return isNaN(n) ? undefined : n
+}
+
+const ZWS = '​' // zero-width space
 
 type RenderMode = 'default' | 'figure'
 
@@ -23,6 +66,8 @@ export class DiscordMessageEncoder<C extends Context = Context> extends MessageE
   private mode: RenderMode = 'default'
   private listType?: 'ol' | 'ul'
   private rows: ActionRow[] = []
+  private embeds: Embed[] = []
+  private currentEmbed: Embed | null = null
   private async getUrl() {
     const input = this.options?.session?.discord
     if (input?.t === 'INTERACTION_CREATE') {
@@ -180,12 +225,20 @@ export class DiscordMessageEncoder<C extends Context = Context> extends MessageE
   async flush() {
     const content = this.buffer.trim()
     this.trimButtons()
-    if (!content && !this.rows.length) return
+    // close any open embed
+    if (this.currentEmbed) {
+      this.embeds.push(this.currentEmbed)
+      this.currentEmbed = null
+    }
+    if (!content && !this.rows.length && !this.embeds.length) return
     this.addition.components = this.rows
-    await this.post({ ...this.addition, content })
+    const payload: Dict = { ...this.addition, content }
+    if (this.embeds.length) payload.embeds = this.embeds
+    await this.post(payload)
     this.buffer = ''
     this.addition = {}
     this.rows = []
+    this.embeds = []
   }
 
   decodeButton(attrs: Dict, label: string): Button {
@@ -244,30 +297,37 @@ export class DiscordMessageEncoder<C extends Context = Context> extends MessageE
     if (type === 'text') {
       this.buffer += sanitize(attrs.content)
     } else if (type === 'b' || type === 'strong') {
+      if (this.buffer.endsWith('*')) this.buffer += ZWS
       this.buffer += '**'
       await this.render(children)
       this.buffer += '**'
     } else if (type === 'i' || type === 'em') {
+      if (this.buffer.endsWith('*')) this.buffer += ZWS
       this.buffer += '*'
       await this.render(children)
       this.buffer += '*'
     } else if (type === 'u' || type === 'ins') {
+      if (this.buffer.endsWith('_')) this.buffer += ZWS
       this.buffer += '__'
       await this.render(children)
       this.buffer += '__'
     } else if (type === 's' || type === 'del') {
+      if (this.buffer.endsWith('~')) this.buffer += ZWS
       this.buffer += '~~'
       await this.render(children)
       this.buffer += '~~'
     } else if (type === 'spl') {
+      if (this.buffer.endsWith('|')) this.buffer += ZWS
       this.buffer += '||'
       await this.render(children)
       this.buffer += '||'
     } else if (type === 'code') {
+      if (this.buffer.endsWith('`')) this.buffer += '\u200b'
       this.buffer += '``'
       this.buffer += sanitizeCode(children.toString())
       this.buffer += '``'
     } else if (type === 'code-block') {
+      if (!this.buffer.endsWith('\n')) this.buffer += '\n'
       this.buffer += `\`\`\`${attrs.language ?? ''}\n`
       this.buffer += sanitizeCode(children.toString())
       this.buffer += '\n```'
@@ -282,15 +342,19 @@ export class DiscordMessageEncoder<C extends Context = Context> extends MessageE
       }
     } else if (type === 'br') {
       this.buffer += '\n'
+      await this.render(children)
     } else if (type === 'p') {
       if (!this.buffer.endsWith('\n')) this.buffer += '\n'
       await this.render(children)
       if (!this.buffer.endsWith('\n')) this.buffer += '\n'
     } else if (type === 'blockquote') {
       if (!this.buffer.endsWith('\n')) this.buffer += '\n'
+      const start = this.buffer.length
       this.buffer += '> '
       await this.render(children)
-      this.buffer += '\n'
+      this.buffer = this.buffer.slice(0, start)
+        + this.buffer.slice(start).replace(/\n(?!\n*$)/g, '\n> ')
+      if (!this.buffer.endsWith('\n')) this.buffer += '\n'
     } else if (type === 'ul' || type === 'ol') {
       this.listType = type
       await this.render(children)
@@ -362,6 +426,9 @@ export class DiscordMessageEncoder<C extends Context = Context> extends MessageE
       }
     } else if (type === 'quote') {
       await this.flush()
+      if (attrs.silent) {
+        this.addition.allowed_mentions = { replied_user: false }
+      }
       const parse = (val: string) => val.replace(/\\([\\*_`~|()\[\]])/g, '$1')
 
       const message = this.stack[this.stack[0].type === 'forward' ? 1 : 0]
@@ -436,11 +503,80 @@ export class DiscordMessageEncoder<C extends Context = Context> extends MessageE
           this.stack[1].author = {}
         }
       }
-    } else if (type === 'button') {
+    } else if (type === 'discord:select') {
+      const selectTypeMap: Record<string, SelectMenu['type']> = {
+        string: ComponentType.SELECT_MENU,
+        user: ComponentType.USER_SELECT,
+        role: ComponentType.ROLE_SELECT,
+        mentionable: ComponentType.MENTIONABLE_SELECT,
+        channel: ComponentType.CHANNEL_SELECT,
+      }
+      const select: SelectMenu = {
+        type: selectTypeMap[attrs.type as string || 'string'] || ComponentType.SELECT_MENU,
+        custom_id: attrs.id,
+        options: children.filter(c => c.type === 'discord:option').map(c => ({
+          label: c.attrs.label,
+          value: c.attrs.value,
+          description: c.attrs.description,
+          emoji: c.attrs.emoji ? { name: c.attrs.emoji } : undefined,
+          default: c.attrs.default,
+        })),
+        placeholder: attrs.placeholder,
+        min_values: attrs.min,
+        max_values: attrs.max,
+        disabled: attrs.disabled,
+      }
       const last = this.lastRow()
-      last.components.push(this.decodeButton(
-        attrs, children.join(''),
-      ))
+      last.components.push(select as any)
+      if (typeof attrs.action === 'function') {
+        this.bot.callbacks[attrs.id] = attrs.action
+      }
+    } else if (type === 'discord:embed') {
+      this.currentEmbed = {}
+      if (attrs.title) this.currentEmbed.title = attrs.title
+      if (attrs.description) this.currentEmbed.description = attrs.description
+      if (attrs.url) this.currentEmbed.url = attrs.url
+      if (attrs.color != null) this.currentEmbed.color = parseColor(attrs.color)
+      if (attrs.timestamp) this.currentEmbed.timestamp = attrs.timestamp
+      await this.render(children)
+      this.embeds.push(this.currentEmbed)
+      this.currentEmbed = null
+    } else if (type === 'discord:embed-author') {
+      if (this.currentEmbed) {
+        this.currentEmbed.author = { name: attrs.name, icon_url: attrs.iconUrl, url: attrs.url }
+      }
+    } else if (type === 'discord:embed-footer') {
+      if (this.currentEmbed) {
+        this.currentEmbed.footer = { text: attrs.text, icon_url: attrs.iconUrl }
+      }
+    } else if (type === 'discord:embed-field') {
+      if (this.currentEmbed) {
+        if (!this.currentEmbed.fields) this.currentEmbed.fields = []
+        this.currentEmbed.fields.push({ name: attrs.name, value: attrs.value, inline: attrs.inline })
+      }
+    } else if (type === 'discord:embed-image') {
+      if (this.currentEmbed) this.currentEmbed.image = { url: attrs.url }
+    } else if (type === 'discord:embed-thumbnail') {
+      if (this.currentEmbed) this.currentEmbed.thumbnail = { url: attrs.url }
+    } else if (type === 'button') {
+      // Store modal config for buttons with input children
+      if (attrs.type === 'input' && children.length) {
+        this.bot.modals[`input${attrs.id}:${attrs.text ?? ''}`] = {
+          title: attrs.text || 'Input',
+          inputs: children.map(c => ({
+            custom_id: c.attrs.id || c.attrs.label,
+            label: c.attrs.label,
+            style: c.attrs.style === 'paragraph' ? 2 : 1,
+            required: c.attrs.required !== false,
+            value: c.attrs.value,
+            placeholder: c.attrs.placeholder,
+            type: c.attrs.type || 'text',
+          })),
+        }
+      }
+      const label = children.length ? children.map(c => c.attrs?.content || '').join('') || (attrs.text || '') : (attrs.text || '')
+      const last = this.lastRow()
+      last.components.push(this.decodeButton(attrs, label))
     } else if (type === 'button-group') {
       if (this.rows.length && this.rows[this.rows.length - 1].components.length) {
         // eg. two <button-group>

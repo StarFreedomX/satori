@@ -1,6 +1,6 @@
 import { Channel, Emoji, integer } from '.'
 
-export type Component = Button | SelectMenu | TextInput | ActionRow
+export type Component = Button | SelectMenu | TextInput | ActionRow | FileUpload
 
 /** https://discord.com/developers/docs/interactions/message-components#component-object-component-types */
 export enum ComponentType {
@@ -20,6 +20,8 @@ export enum ComponentType {
   MENTIONABLE_SELECT = 7,
   /** Select menu for channels */
   CHANNEL_SELECT = 8,
+  /** A file upload input (modal only) */
+  FILE_UPLOAD = 9,
 }
 
 /** https://discord.com/developers/docs/interactions/message-components#action-rows */
@@ -114,6 +116,13 @@ export interface TextInput {
   value?: string
   /** custom placeholder text if the input is empty, max 100 characters */
   placeholder?: string
+}
+
+/** A file upload input for modals */
+export interface FileUpload {
+  type: ComponentType.FILE_UPLOAD
+  custom_id: string
+  required?: boolean
 }
 
 /** @see https://discord.com/developers/docs/interactions/message-components#text-inputs-text-input-styles */
